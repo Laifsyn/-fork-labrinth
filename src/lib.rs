@@ -3,10 +3,11 @@ use std::sync::Arc;
 use actix_web::web;
 use database::redis::RedisPool;
 use log::{info, warn};
-use queue::{
-    analytics::AnalyticsQueue, payouts::PayoutsQueue, session::AuthQueue, socket::ActiveSockets,
-};
-use scheduler::Scheduler;
+use queue::analytics::AnalyticsQueue;
+use queue::payouts::PayoutsQueue;
+use queue::session::AuthQueue;
+use queue::socket::ActiveSockets;
+use scheduler::{Scheduler, VersionIndexingError};
 use sqlx::Postgres;
 use tokio::sync::RwLock;
 
@@ -15,11 +16,9 @@ use clickhouse_crate::Client;
 use util::cors::default_cors;
 
 use crate::queue::moderation::AutomatedModerationQueue;
-use crate::{
-    queue::payouts::process_payout,
-    search::indexing::index_projects,
-    util::env::{parse_strings_from_var, parse_var},
-};
+use crate::queue::payouts::process_payout;
+use crate::search::indexing::index_projects;
+use crate::util::env::{parse_strings_from_var, parse_var};
 
 pub mod auth;
 pub mod clickhouse;
@@ -64,10 +63,7 @@ pub fn app_setup(
     file_host: Arc<dyn file_hosting::FileHost + Send + Sync>,
     maxmind: Arc<queue::maxmind::MaxMindIndexer>,
 ) -> LabrinthConfig {
-    info!(
-        "Starting Labrinth on {}",
-        dotenvy::var("BIND_ADDR").unwrap()
-    );
+    info!("Starting Labrinth on {}", dotenvy::var("BIND_ADDR").unwrap());
 
     let automated_moderation_queue = web::Data::new(AutomatedModerationQueue::default());
 
@@ -75,17 +71,14 @@ pub fn app_setup(
     let pool_ref = pool.clone();
     let redis_pool_ref = redis_pool.clone();
     actix_rt::spawn(async move {
-        automated_moderation_queue_ref
-            .task(pool_ref, redis_pool_ref)
-            .await;
+        automated_moderation_queue_ref.task(pool_ref, redis_pool_ref).await;
     });
 
     let mut scheduler = scheduler::Scheduler::new();
 
     // The interval in seconds at which the local database is indexed
     // for searching.  Defaults to 1 hour if unset.
-    let local_index_interval =
-        std::time::Duration::from_secs(parse_var("LOCAL_INDEX_INTERVAL").unwrap_or(3600));
+    let local_index_interval = std::time::Duration::from_secs(parse_var("LOCAL_INDEX_INTERVAL").unwrap_or(3600));
 
     let pool_ref = pool.clone();
     let search_config_ref = search_config.clone();
@@ -178,10 +171,7 @@ pub fn app_setup(
                 info!("Downloading MaxMind GeoLite2 country database");
                 let result = reader_ref.index().await;
                 if let Err(e) = result {
-                    warn!(
-                        "Downloading MaxMind GeoLite2 country database failed: {:?}",
-                        e
-                    );
+                    warn!("Downloading MaxMind GeoLite2 country database failed: {:?}", e);
                 }
                 info!("Done downloading MaxMind GeoLite2 country database");
             }
@@ -203,9 +193,7 @@ pub fn app_setup(
 
             async move {
                 info!("Indexing analytics queue");
-                let result = analytics_queue_ref
-                    .index(client_ref, &redis_ref, &pool_ref)
-                    .await;
+                let result = analytics_queue_ref.index(client_ref, &redis_ref, &pool_ref).await;
                 if let Err(e) = result {
                     warn!("Indexing analytics queue failed: {:?}", e);
                 }
@@ -234,9 +222,7 @@ pub fn app_setup(
         });
     }
 
-    let ip_salt = Pepper {
-        pepper: models::ids::Base62Id(models::ids::random_base62(11)).to_string(),
-    };
+    let ip_salt = Pepper { pepper: models::ids::Base62Id(models::ids::random_base62(11)).to_string() };
 
     let payouts_queue = web::Data::new(PayoutsQueue::new());
     let active_sockets = web::Data::new(RwLock::new(ActiveSockets::default()));
@@ -260,20 +246,16 @@ pub fn app_setup(
 
 pub fn app_config(cfg: &mut web::ServiceConfig, labrinth_config: LabrinthConfig) {
     cfg.app_data(
-        web::FormConfig::default()
-            .error_handler(|err, _req| routes::ApiError::Validation(err.to_string()).into()),
+        web::FormConfig::default().error_handler(|err, _req| routes::ApiError::Validation(err.to_string()).into()),
     )
     .app_data(
-        web::PathConfig::default()
-            .error_handler(|err, _req| routes::ApiError::Validation(err.to_string()).into()),
+        web::PathConfig::default().error_handler(|err, _req| routes::ApiError::Validation(err.to_string()).into()),
     )
     .app_data(
-        web::QueryConfig::default()
-            .error_handler(|err, _req| routes::ApiError::Validation(err.to_string()).into()),
+        web::QueryConfig::default().error_handler(|err, _req| routes::ApiError::Validation(err.to_string()).into()),
     )
     .app_data(
-        web::JsonConfig::default()
-            .error_handler(|err, _req| routes::ApiError::Validation(err.to_string()).into()),
+        web::JsonConfig::default().error_handler(|err, _req| routes::ApiError::Validation(err.to_string()).into()),
     )
     .app_data(web::Data::new(labrinth_config.redis_pool.clone()))
     .app_data(web::Data::new(labrinth_config.pool.clone()))
@@ -301,11 +283,7 @@ pub fn check_env_vars() -> bool {
     fn check_var<T: std::str::FromStr>(var: &'static str) -> bool {
         let check = parse_var::<T>(var).is_none();
         if check {
-            warn!(
-                "Variable `{}` missing in dotenv or not of type `{}`",
-                var,
-                std::any::type_name::<T>()
-            );
+            warn!("Variable `{}` missing in dotenv or not of type `{}`", var, std::any::type_name::<T>());
         }
         check
     }
@@ -341,7 +319,11 @@ pub fn check_env_vars() -> bool {
             failed |= check_var::<String>("MOCK_FILE_PATH");
         }
         Some(backend) => {
-            warn!("Variable `STORAGE_BACKEND` contains an invalid value: {}. Expected \"backblaze\", \"s3\", or \"local\".", backend);
+            warn!(
+                "Variable `STORAGE_BACKEND` contains an invalid value: {}. Expected \"backblaze\", \"s3\", or \
+                 \"local\".",
+                backend
+            );
             failed |= true;
         }
         _ => {
@@ -397,9 +379,7 @@ pub fn check_env_vars() -> bool {
     failed |= check_var::<String>("BEEHIIV_API_KEY");
 
     if parse_strings_from_var("ANALYTICS_ALLOWED_ORIGINS").is_none() {
-        warn!(
-            "Variable `ANALYTICS_ALLOWED_ORIGINS` missing in dotenv or not a json array of strings"
-        );
+        warn!("Variable `ANALYTICS_ALLOWED_ORIGINS` missing in dotenv or not a json array of strings");
         failed |= true;
     }
 
